@@ -13,13 +13,24 @@ from .core.task_actor.scenario_actor.scenario_actor_handler import ScenarioActor
 from .utils.traffic_light import TrafficLightHandler
 from .utils.dynamic_weather import WeatherHandler
 from stable_baselines3.common.utils import set_random_seed
+import math
 
 logger = logging.getLogger(__name__)
 
 
 class CarlaMultiAgentEnv(gym.Env):
-    def __init__(self, carla_map, host, port, seed, no_rendering,
-                 obs_configs, reward_configs, terminal_configs, all_tasks):
+    def __init__(
+        self,
+        carla_map,
+        host,
+        port,
+        seed,
+        no_rendering,
+        obs_configs,
+        reward_configs,
+        terminal_configs,
+        all_tasks,
+    ):
         self._all_tasks = all_tasks
         self._obs_configs = obs_configs
         self._carla_map = carla_map
@@ -31,7 +42,9 @@ class CarlaMultiAgentEnv(gym.Env):
 
         # define observation spaces exposed to agent
         self._om_handler = ObsManagerHandler(obs_configs)
-        self._ev_handler = EgoVehicleHandler(self._client, reward_configs, terminal_configs)
+        self._ev_handler = EgoVehicleHandler(
+            self._client, reward_configs, terminal_configs
+        )
         # self._zw_handler = ZombieWalkerHandler(self._client)
         # self._zv_handler = ZombieVehicleHandler(self._client, tm_port=self._tm.get_port())
         self._sa_handler = ScenarioActorHandler(self._client)
@@ -41,15 +54,23 @@ class CarlaMultiAgentEnv(gym.Env):
         self.observation_space = self._om_handler.observation_space
         # define action spaces exposed to agent
         # throttle, steer, brake
-        self.action_space = gym.spaces.Dict({ego_vehicle_id: gym.spaces.Box(
-            low=np.array([0.0, -1.0, 0.0]),
-            high=np.array([1.0, 1.0, 1.0]),
-            dtype=np.float32)
-            for ego_vehicle_id in obs_configs.keys()})
+        self.action_space = gym.spaces.Dict(
+            {
+                ego_vehicle_id: gym.spaces.Box(
+                    low=np.array([0.0, -1.0, 0.0]),
+                    high=np.array([1.0, 1.0, 1.0]),
+                    dtype=np.float32,
+                )
+                for ego_vehicle_id in obs_configs.keys()
+            }
+        )
 
         self._task_idx = 0
         self._shuffle_task = True
         self._task = self._all_tasks[self._task_idx].copy()
+
+        # FIXME: add speculator
+        self.spectator = self._world.get_spectator()
 
     def set_task_idx(self, task_idx):
         self._task_idx = task_idx
@@ -73,10 +94,12 @@ class CarlaMultiAgentEnv(gym.Env):
         # self._wt_handler.reset(self._task['weather'])
         # logger.debug("_wt_handler reset done!!")
 
-        ev_spawn_locations = self._ev_handler.reset(self._task['ego_vehicles'])
+        ev_spawn_locations = self._ev_handler.reset(self._task["ego_vehicles"])
         logger.debug("_ev_handler reset done!!")
 
-        self._sa_handler.reset(self._task['scenario_actors'], self._ev_handler.ego_vehicles)
+        self._sa_handler.reset(
+            self._task["scenario_actors"], self._ev_handler.ego_vehicles
+        )
         logger.debug("_sa_handler reset done!!")
 
         # self._zw_handler.reset(self._task['num_zombie_walkers'], ev_spawn_locations)
@@ -92,15 +115,15 @@ class CarlaMultiAgentEnv(gym.Env):
 
         snap_shot = self._world.get_snapshot()
         self._timestamp = {
-            'step': 0,
-            'frame': snap_shot.timestamp.frame,
-            'relative_wall_time': 0.0,
-            'wall_time': snap_shot.timestamp.platform_timestamp,
-            'relative_simulation_time': 0.0,
-            'simulation_time': snap_shot.timestamp.elapsed_seconds,
-            'start_frame': snap_shot.timestamp.frame,
-            'start_wall_time': snap_shot.timestamp.platform_timestamp,
-            'start_simulation_time': snap_shot.timestamp.elapsed_seconds
+            "step": 0,
+            "frame": snap_shot.timestamp.frame,
+            "relative_wall_time": 0.0,
+            "wall_time": snap_shot.timestamp.platform_timestamp,
+            "relative_simulation_time": 0.0,
+            "simulation_time": snap_shot.timestamp.elapsed_seconds,
+            "start_frame": snap_shot.timestamp.frame,
+            "start_wall_time": snap_shot.timestamp.platform_timestamp,
+            "start_simulation_time": snap_shot.timestamp.elapsed_seconds,
         }
 
         _, _, _ = self._ev_handler.tick(self.timestamp)
@@ -116,13 +139,19 @@ class CarlaMultiAgentEnv(gym.Env):
 
         # update timestamp
         snap_shot = self._world.get_snapshot()
-        self._timestamp['step'] = snap_shot.timestamp.frame-self._timestamp['start_frame']
-        self._timestamp['frame'] = snap_shot.timestamp.frame
-        self._timestamp['wall_time'] = snap_shot.timestamp.platform_timestamp
-        self._timestamp['relative_wall_time'] = self._timestamp['wall_time'] - self._timestamp['start_wall_time']
-        self._timestamp['simulation_time'] = snap_shot.timestamp.elapsed_seconds
-        self._timestamp['relative_simulation_time'] = self._timestamp['simulation_time'] \
-            - self._timestamp['start_simulation_time']
+        self._timestamp["step"] = (
+            snap_shot.timestamp.frame - self._timestamp["start_frame"]
+        )
+        self._timestamp["frame"] = snap_shot.timestamp.frame
+        self._timestamp["wall_time"] = snap_shot.timestamp.platform_timestamp
+        self._timestamp["relative_wall_time"] = (
+            self._timestamp["wall_time"] - self._timestamp["start_wall_time"]
+        )
+        self._timestamp["simulation_time"] = snap_shot.timestamp.elapsed_seconds
+        self._timestamp["relative_simulation_time"] = (
+            self._timestamp["simulation_time"]
+            - self._timestamp["start_simulation_time"]
+        )
 
         reward_dict, done_dict, info_dict = self._ev_handler.tick(self.timestamp)
 
@@ -136,7 +165,44 @@ class CarlaMultiAgentEnv(gym.Env):
         # num_vehicles = len(self._world.get_actors().filter("vehicle*"))
         # logger.debug(f"num_walkers: {num_walkers}, num_vehicles: {num_vehicles}, ")
 
+        # FIXME: set spectator
+        ev_tf = self._ev_handler.ego_vehicles["hero"].vehicle.get_transform()
+        y, x = self.calculate_sides(5, ev_tf.rotation.yaw)
+        spectator_pos = carla.Transform(
+            ev_tf.location + carla.Location(x=-x, y=-y, z=5),
+            carla.Rotation(yaw=ev_tf.rotation.yaw, pitch=-25),
+        )
+        self.spectator.set_transform(spectator_pos)
+
         return obs_dict, reward_dict, done_dict, info_dict
+
+    # function to claculate sides (x,y) of a right-angle triangle
+
+    def calculate_sides(self, hypotenuse, angle):
+        """
+        Calculates the two sides of a right triangle given the hypotenuse and an angle.
+
+        Args:
+            hypotenuse: The length of the hypotenuse of the triangle.
+            represents the distance we need to be from the car
+            angle: The angle of the triangle in degrees.
+            represents the yaw angle of the car we need to be aligned with
+
+        Returns:
+            A tuple containing the lengths of the two sides of the triangle.
+            which are delta x and y
+        """
+
+        # Convert the angle to radians
+        angle_radians = math.radians(angle)
+
+        # Calculate the opposite side using the sine function
+        opposite_side = hypotenuse * math.sin(angle_radians)
+
+        # Calculate the adjacent side using the cosine function
+        adjacent_side = hypotenuse * math.cos(angle_radians)
+
+        return opposite_side, adjacent_side
 
     def _init_client(self, carla_map, host, port, seed=2021, no_rendering=False):
         client = None
@@ -151,7 +217,7 @@ class CarlaMultiAgentEnv(gym.Env):
 
         self._client = client
         self._world = client.load_world(carla_map)
-        self._tm = client.get_trafficmanager(port+6000)
+        self._tm = client.get_trafficmanager(port + 6000)
 
         self.set_sync_mode(True)
         self.set_no_rendering_mode(self._world, no_rendering)

@@ -45,6 +45,7 @@ class CarlaMultiAgentEnv(gym.Env):
         self._ev_handler = EgoVehicleHandler(
             self._client, reward_configs, terminal_configs
         )
+        # FIXME: zombie obstacles have been commented. why???
         # self._zw_handler = ZombieWalkerHandler(self._client)
         # self._zv_handler = ZombieVehicleHandler(self._client, tm_port=self._tm.get_port())
         self._sa_handler = ScenarioActorHandler(self._client)
@@ -220,7 +221,8 @@ class CarlaMultiAgentEnv(gym.Env):
         self._tm = client.get_trafficmanager(port + 6000)
 
         self.set_sync_mode(True)
-        self.set_no_rendering_mode(self._world, no_rendering)
+        # FIXME: render the world
+        # self.set_no_rendering_mode(self._world, no_rendering)
 
         # self._tm.set_hybrid_physics_mode(True)
 

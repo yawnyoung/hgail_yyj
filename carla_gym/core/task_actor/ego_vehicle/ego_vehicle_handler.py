@@ -53,6 +53,12 @@ class EgoVehicleHandler(object):
             wp = self._map.get_waypoint(spawn_transform.location)
             spawn_transform.location.z = wp.transform.location.z + 1.321
 
+            print(
+                "=====> reset EgoVehicle at location {}".format(
+                    spawn_transform.location
+                )
+            )
+
             carla_vehicle = self._world.try_spawn_actor(blueprint, spawn_transform)
             self._world.tick()
 

@@ -117,6 +117,8 @@ def get_obs_configs(rgb=False):
 def get_env_wrapper_configs(rgb=True):
     env_wrapper_configs = {
         "input_states": ["control", "state", "vel_xy"],
+        # FIXME: acc as action so learning fast...
+        # "acc_as_action": False,
         "acc_as_action": True,
     }
     if rgb:
@@ -213,7 +215,8 @@ if __name__ == "__main__":
         "initial_learning_rate": 2e-5,
         "gail": GAIL,
         # "n_steps_total": 12288,
-        "n_steps_total": 8192,
+        # "n_steps_total": 8192,
+        "n_steps_total": 6144,
         "batch_size": 256,
         "n_epochs": 20,
         "gamma": 0.99,

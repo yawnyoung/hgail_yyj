@@ -4,9 +4,9 @@ import numpy as np
 
 
 class ValeoNoDetPx(object):
-    '''
+    """
     Follow valeo paper as close as possible
-    '''
+    """
 
     def __init__(self, ego_vehicle, exploration_suggest=True, eval_mode=False):
         self._ego_vehicle = ego_vehicle
@@ -20,7 +20,7 @@ class ValeoNoDetPx(object):
 
     def get(self, timestamp):
         # Done condition 1: vehicle blocked
-        c_blocked = self._ego_vehicle.info_criteria['blocked'] is not None
+        c_blocked = self._ego_vehicle.info_criteria["blocked"] is not None
 
         # Done condition 2: lateral distance too large
         ev_loc = self._ego_vehicle.vehicle.get_location()
@@ -28,7 +28,9 @@ class ValeoNoDetPx(object):
         d_vec = ev_loc - wp_transform.location
         np_d_vec = np.array([d_vec.x, d_vec.y], dtype=np.float32)
         wp_unit_forward = wp_transform.rotation.get_forward_vector()
-        np_wp_unit_right = np.array([-wp_unit_forward.y, wp_unit_forward.x], dtype=np.float32)
+        np_wp_unit_right = np.array(
+            [-wp_unit_forward.y, wp_unit_forward.x], dtype=np.float32
+        )
         lat_dist = np.abs(np.dot(np_wp_unit_right, np_d_vec))
 
         if lat_dist - self._last_lat_dist > 0.8:
@@ -41,7 +43,7 @@ class ValeoNoDetPx(object):
         # Done condition 3: running red light
         # c_run_rl = self._ego_vehicle.info_criteria['run_red_light'] is not None
         # Done condition 4: collision
-        c_collision = self._ego_vehicle.info_criteria['collision'] is not None
+        c_collision = self._ego_vehicle.info_criteria["collision"] is not None
         # Done condition 5: run stop sign
         # if self._ego_vehicle.info_criteria['run_stop_sign'] is not None \
         #         and self._ego_vehicle.info_criteria['run_stop_sign']['event'] == 'run':
@@ -57,12 +59,17 @@ class ValeoNoDetPx(object):
 
         # endless env: timeout means succeed
         if self._eval_mode:
-            timeout = timestamp['relative_simulation_time'] > self._eval_time
+            timeout = timestamp["relative_simulation_time"] > self._eval_time
         else:
             timeout = False
 
         # done = c_blocked or c_lat_dist or c_run_rl or c_collision or c_run_stop or c_collision_px or timeout
         done = c_blocked or c_lat_dist or c_collision or c_collision_px or timeout
+        print(
+            "blocked {}, lat_dist {}, collision {}, collision_px {}, timeout {}, done {}".format(
+                c_blocked, c_lat_dist, c_collision, c_collision_px, timeout, done
+            )
+        )
 
         # terminal reward
         terminal_reward = 0.0
@@ -75,33 +82,30 @@ class ValeoNoDetPx(object):
             terminal_reward -= ev_speed
 
         # terminal guide
-        exploration_suggest = {
-            'n_steps': 0,
-            'suggest': ('', '')
-        }
+        exploration_suggest = {"n_steps": 0, "suggest": ("", "")}
         if self._exploration_suggest:
             if c_blocked:
-                exploration_suggest['n_steps'] = 100
-                exploration_suggest['suggest'] = ('go', '')
+                exploration_suggest["n_steps"] = 100
+                exploration_suggest["suggest"] = ("go", "")
             if c_lat_dist:
-                exploration_suggest['n_steps'] = 100
-                exploration_suggest['suggest'] = ('go', 'turn')
+                exploration_suggest["n_steps"] = 100
+                exploration_suggest["suggest"] = ("go", "turn")
             # if c_run_rl or c_collision or c_run_stop or c_collision_px:
             if c_collision or c_collision_px:
-                exploration_suggest['n_steps'] = 100
-                exploration_suggest['suggest'] = ('stop', '')
+                exploration_suggest["n_steps"] = 100
+                exploration_suggest["suggest"] = ("stop", "")
 
         # debug info
 
         debug_texts = [
-            f'ev: {int(self._eval_mode)} blo:{int(c_blocked)} to:{int(timeout)}',
+            f"ev: {int(self._eval_mode)} blo:{int(c_blocked)} to:{int(timeout)}",
             # f'c_px:{int(c_collision_px)} col:{int(c_collision)} red:{int(c_run_rl)} st:{int(c_run_stop)}',
-            f'c_px:{int(c_collision_px)} col:{int(c_collision)}',
+            f"c_px:{int(c_collision_px)} col:{int(c_collision)}",
             f"latd:{int(c_lat_dist)}, {lat_dist:.2f}/{thresh_lat_dist:.2f}, "
-            f"[{exploration_suggest['n_steps']} {exploration_suggest['suggest']}]"
+            f"[{exploration_suggest['n_steps']} {exploration_suggest['suggest']}]",
         ]
         terminal_debug = {
-            'exploration_suggest': exploration_suggest,
-            'debug_texts': debug_texts
+            "exploration_suggest": exploration_suggest,
+            "debug_texts": debug_texts,
         }
         return done, timeout, terminal_reward, terminal_debug

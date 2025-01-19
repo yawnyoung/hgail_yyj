@@ -14,6 +14,7 @@ from torchvision import transforms
 from rl_birdview.models.torch_layers import DiscXtMaCNN, RGBDiscXtMaCNN
 from PIL import Image, ImageDraw
 from stable_baselines3.common.running_mean_std import RunningMeanStd
+from tqdm import tqdm
 
 
 class Discriminator(nn.Module):
@@ -27,6 +28,7 @@ class Discriminator(nn.Module):
         rgb_gail=False,
         traj_plot=True,
         start_update=0,
+        **kwargs,
     ):
 
         super(Discriminator, self).__init__()
@@ -35,6 +37,10 @@ class Discriminator(nn.Module):
         self.batch_size = batch_size
         self.rgb_gail = rgb_gail
         self.traj_plot = traj_plot
+
+        self.algo_type = "hgail"
+        if "algo_type" in kwargs:
+            self.algo_type = kwargs["algo_type"]
 
         if th.cuda.is_available():
             self.device = "cuda"
@@ -64,13 +70,26 @@ class Discriminator(nn.Module):
         self.disc_head_arch = list(disc_head_arch)
         self.activation_fn = nn.ReLU
 
+        # TODO: potential feature extractor
+        # TODO: potential head
+
         self._build()
-        self.expert_loader = th.utils.data.DataLoader(
-            ExpertDataset(
+        if self.algo_type == "hgail":
+            expert_dataset = ExpertDataset(
                 "gail_experts",
                 n_routes=8,
                 n_eps=1,
-            ),
+            )
+        elif self.algo_type == "airl":
+            expert_dataset = ExpertTransitionDataset(
+                "gail_experts",
+                n_routes=8,
+                n_eps=1,
+            )
+        else:
+            raise ValueError(f"Unknown algorithm type: {self.algo_type}")
+        self.expert_loader = th.utils.data.DataLoader(
+            expert_dataset,
             batch_size=self.batch_size,
             shuffle=True,
         )
@@ -94,11 +113,13 @@ class Discriminator(nn.Module):
         disc_net.append(nn.Linear(last_layer_dim_disc, 1))
         self.disc_head = nn.Sequential(*disc_net).to(self.device)
 
+        # TODO: potential head
+
         self.optimizer = self.optimizer_class(
             self.parameters(), **self.optimizer_kwargs
         )
 
-    def forward(self, obs_dict, action):
+    def forward(self, obs_dict, action, next_obs_dict=None):
         """
         used in collect_rollouts(), do not clamp actions
         """
@@ -124,14 +145,24 @@ class Discriminator(nn.Module):
             state = obs_dict["state"].to(self.device)
             action = action.to(self.device)
             features = self.features_extractor(rgb, cmd, traj, state, action)
+            disc = self.disc_head(features)
         else:
-            birdview = obs_dict["birdview"].to(self.device)
-            birdview = birdview.float() / 255.0
-            state = obs_dict["state"].to(self.device)
-            action = action.to(self.device)
-            features = self.features_extractor(birdview, state, action)
-
-        disc = self.disc_head(features)
+            if self.algo_type == "hgail":
+                birdview = obs_dict["birdview"].to(self.device)
+                birdview = birdview.float() / 255.0
+                state = obs_dict["state"].to(self.device)
+                action = action.to(self.device)
+                features = self.features_extractor(birdview, state, action)
+                disc = self.disc_head(features)
+            elif self.algo_type == "airl":
+                # base reward
+                birdview = obs_dict["birdview"].to(self.device)
+                birdview = birdview.float() / 255.0
+                state = obs_dict["state"].to(self.device)
+                action = action.to(self.device)
+                features = self.features_extractor(birdview, state, action)
+                disc = self.disc_head(features)
+                # TODO: shape reward 1. potential feature extractor 2. potential head 3. r = r_b + lambda * r_s(o') - r_s(o)
 
         return disc
 
@@ -268,65 +299,89 @@ class Discriminator(nn.Module):
             )  # Warm up
             disc_epoch = int(disc_epoch)
 
-        for _ in range(disc_epoch):
-            for expert_batch, policy_batch in zip(
-                self.expert_loader, rollout_buffer.get(self.batch_size)
-            ):
-                policy_obs_dict = policy_batch.observations
-                policy_action = policy_batch.actions
-
-                expert_obs_dict, expert_action = expert_batch
-
-                if (
-                    policy_obs_dict["birdview"].size()
-                    != expert_obs_dict["birdview"].size()
+        with tqdm(total=disc_epoch) as pbar:
+            for _ in range(disc_epoch):
+                for expert_batch, policy_batch in zip(
+                    self.expert_loader, rollout_buffer.get(self.batch_size)
                 ):
-                    continue
+                    policy_obs_dict = policy_batch.observations
+                    policy_action = policy_batch.actions
+                    policy_next_obs_dict = None
+                    if self.algo_type == "airl":
+                        policy_next_obs_dict = policy_batch.next_observations
 
-                policy_d = self.forward(policy_obs_dict, policy_action)
-                policy_reward += policy_d.sum().item()
+                    # expert data
+                    if self.algo_type == "hgail":
+                        expert_obs_dict, expert_action = expert_batch
+                    elif self.algo_type == "airl":
+                        expert_obs_dict, expert_action, expert_next_obs_dict = (
+                            expert_batch
+                        )
+                        # TEST expert obs dict when not shuffle
+                        # print(
+                        #     "obs match ",
+                        #     verify_next_observation(
+                        #         expert_obs_dict, expert_next_obs_dict
+                        #     ),
+                        # )
 
-                expert_d = self.forward(expert_obs_dict, expert_action)
-                expert_reward += expert_d.sum().item()
-                n_samples = policy_obs_dict["state"].shape[0]
+                    if (
+                        policy_obs_dict["birdview"].size()
+                        != expert_obs_dict["birdview"].size()
+                    ):
+                        print(
+                            "!!!!!size of policy obs {} != size of expert obs {}".format(
+                                policy_obs_dict["birdview"].size(),
+                                expert_obs_dict["birdview"].size(),
+                            )
+                        )
+                        continue
 
-                # Wasserstein discriminator loss
-                # expert_loss = th.mean(th.tanh(expert_d))
-                # policy_loss = th.mean(th.tanh(policy_d))
+                    policy_d = self.forward(policy_obs_dict, policy_action)
+                    policy_reward += policy_d.sum().item()
 
-                # expert_ac_loss += (expert_loss).item() * n_samples
-                # policy_ac_loss += (policy_loss).item() * n_samples
+                    expert_d = self.forward(expert_obs_dict, expert_action)
+                    expert_reward += expert_d.sum().item()
+                    n_samples = policy_obs_dict["state"].shape[0]
 
-                # wd = expert_loss - policy_loss
-                # grad_pen = self.compute_grad_pen(
-                #     expert_obs_dict, expert_action, policy_obs_dict, policy_action
-                # )
+                    # Wasserstein discriminator loss
+                    # expert_loss = th.mean(th.tanh(expert_d))
+                    # policy_loss = th.mean(th.tanh(policy_d))
 
-                # loss += (-wd + grad_pen).item() * n_samples
-                # g_loss += (wd).item() * n_samples
-                # gp += (grad_pen).item() * n_samples
+                    # expert_ac_loss += (expert_loss).item() * n_samples
+                    # policy_ac_loss += (policy_loss).item() * n_samples
 
-                # FIXME: binary cross entropy discriminator loss
-                # Binary labels
-                real_labels = th.ones_like(expert_d)
-                fake_labels = th.zeros_like(policy_d)
-                labels = th.cat([real_labels, fake_labels])
-                rewards = th.cat([expert_d, policy_d])
-                bce_logits = nn.BCEWithLogitsLoss()
-                bce_loss = bce_logits(rewards, labels)
+                    # wd = expert_loss - policy_loss
+                    # grad_pen = self.compute_grad_pen(
+                    #     expert_obs_dict, expert_action, policy_obs_dict, policy_action
+                    # )
 
-                update_samples += n_samples
+                    # loss += (-wd + grad_pen).item() * n_samples
+                    # g_loss += (wd).item() * n_samples
+                    # gp += (grad_pen).item() * n_samples
 
-                self.optimizer.zero_grad()
+                    # FIXME: binary cross entropy discriminator loss
+                    # Binary labels
+                    real_labels = th.ones_like(expert_d)
+                    fake_labels = th.zeros_like(policy_d)
+                    labels = th.cat([real_labels, fake_labels])
+                    rewards = th.cat([expert_d, policy_d])
+                    bce_logits = nn.BCEWithLogitsLoss()
+                    bce_loss = bce_logits(rewards, labels)
 
-                # Wasserstein discriminator loss
-                # (-wd + grad_pen).backward()
+                    update_samples += n_samples
 
-                # FIXME: binary cross entropy discriminator loss
-                bce_loss.backward()
+                    self.optimizer.zero_grad()
 
-                nn.utils.clip_grad_norm_(self.parameters(), self.max_grad_norm)
-                self.optimizer.step()
+                    # Wasserstein discriminator loss
+                    # (-wd + grad_pen).backward()
+
+                    # FIXME: binary cross entropy discriminator loss
+                    bce_loss.backward()
+
+                    nn.utils.clip_grad_norm_(self.parameters(), self.max_grad_norm)
+                    self.optimizer.step()
+                pbar.update(1)
 
         self.disc_debug = {
             "disc/loss": loss / update_samples,
@@ -368,6 +423,40 @@ class Discriminator(nn.Module):
             #     )
             # )
             return ret
+
+
+def verify_next_observation(obs_dict, next_obs_dict):
+    """
+    Verify if next_obs_dict is equivalent to the next state of obs_dict
+
+    Args:
+        obs_dict (dict): Current observation dictionary with 'birdview' and 'state' keys
+        next_obs_dict (dict): Next observation dictionary with 'birdview' and 'state' keys
+
+    Returns:
+        bool: True if observations match, False otherwise
+    """
+    # Check if both dictionaries have the same keys
+    if set(obs_dict.keys()) != set(next_obs_dict.keys()):
+        print(
+            "key not match obs {}, next obs {} ".format(
+                obs_dict.keys(), next_obs_dict.keys()
+            )
+        )
+        return False
+
+    # Check birdview arrays
+    birdview_match = np.array_equal(
+        obs_dict["birdview"][1:],  # All except first item
+        next_obs_dict["birdview"][:-1],  # All except last item
+    )
+
+    # Check state arrays
+    state_match = np.array_equal(
+        obs_dict["state"][1:],  # All except first item
+        next_obs_dict["state"][:-1],  # All except last item
+    )
+    return birdview_match and state_match
 
 
 def traj_plotter(traj, img_path=None):
@@ -515,3 +604,143 @@ class ExpertDataset(th.utils.data.Dataset):
             obs_dict = self.actual_obs[j]
 
         return obs_dict, self.trajs_actions[j]
+
+
+class ExpertTransitionDataset(ExpertDataset):
+    def __init__(
+        self, dataset_directory, n_routes=1, n_eps=1, route_start=0, ep_start=0
+    ):
+        self.dataset_path = Path(dataset_directory)
+        self.length = 0
+        self.get_idx = []
+        self.trajs_states = []
+        self.trajs_actions = []
+        self.trajs_last_states = {}
+
+        for route_idx in range(route_start, route_start + n_routes):
+            for ep_idx in range(ep_start, ep_start + n_eps):
+                route_path = (
+                    self.dataset_path
+                    / ("route_%02d" % route_idx)
+                    / ("ep_%02d" % ep_idx)
+                )
+                route_df = pd.read_json(route_path / "episode.json")
+                traj_length = route_df.shape[0]
+                self.length += traj_length - 1
+                for step_idx in range(traj_length - 1):
+                    self.get_idx.append((route_idx, ep_idx, step_idx, traj_length - 2))
+                    state_dict = {}
+                    for state_key in route_df.columns:
+                        state_dict[state_key] = route_df.iloc[step_idx][state_key]
+                    self.trajs_states.append(state_dict)
+                    self.trajs_actions.append(
+                        th.Tensor(route_df.iloc[step_idx]["actions"])
+                    )
+                last_state_dict = {}
+                for state_key in route_df.columns:
+                    last_state_dict[state_key] = route_df.iloc[traj_length - 1][
+                        state_key
+                    ]
+                self.trajs_last_states[(route_idx, ep_idx)] = last_state_dict
+
+        self.trajs_actions = th.stack(self.trajs_actions)
+        self.actual_obs = [None for _ in range(self.length)]
+        self.next_obs = [None for _ in range(self.length)]
+
+    def __getitem__(self, j):
+        route_idx, ep_idx, step_idx, last_idx = self.get_idx[j]
+        if self.actual_obs[j] is None:
+            # Load only the first time, images in uint8 are supposed to be light
+            ep_dir = self.dataset_path / "route_{:0>2d}/ep_{:0>2d}".format(
+                route_idx, ep_idx
+            )
+
+            # obs
+            masks_list = []
+            for mask_index in range(1):
+                mask_tensor = self.process_image(
+                    ep_dir
+                    / "birdview_masks/{:0>4d}_{:0>2d}.png".format(step_idx, mask_index)
+                )
+                masks_list.append(mask_tensor)
+            birdview = th.cat(masks_list)
+
+            central_rgb = self.process_image(
+                ep_dir / "central_rgb/{:0>4d}.png".format(step_idx)
+            )
+            left_rgb = self.process_image(
+                ep_dir / "left_rgb/{:0>4d}.png".format(step_idx)
+            )
+            right_rgb = self.process_image(
+                ep_dir / "right_rgb/{:0>4d}.png".format(step_idx)
+            )
+
+            obs_dict = {
+                "birdview": birdview,
+                "central_rgb": central_rgb,
+                "left_rgb": left_rgb,
+                "right_rgb": right_rgb,
+                "item_idx": j,
+            }
+
+            state_dict = self.trajs_states[j]
+            for state_key in state_dict:
+                obs_dict[state_key] = th.Tensor(state_dict[state_key])
+
+            obs_dict["traj_plot"] = traj_plotter(state_dict["traj"])
+            obs_dict["traj_plot_rgb"] = traj_plotter_rgb(state_dict["traj"])
+
+            # next obs
+            masks_list.clear()
+            for mask_index in range(1):
+                mask_tensor = self.process_image(
+                    ep_dir
+                    / "birdview_masks/{:0>4d}_{:0>2d}.png".format(
+                        step_idx + 1, mask_index
+                    )
+                )
+                masks_list.append(mask_tensor)
+            birdview = th.cat(masks_list)
+
+            central_rgb = self.process_image(
+                ep_dir / "central_rgb/{:0>4d}.png".format(step_idx + 1)
+            )
+            left_rgb = self.process_image(
+                ep_dir / "left_rgb/{:0>4d}.png".format(step_idx + 1)
+            )
+            right_rgb = self.process_image(
+                ep_dir / "right_rgb/{:0>4d}.png".format(step_idx + 1)
+            )
+
+            next_obs_dict = {
+                "birdview": birdview,
+                "central_rgb": central_rgb,
+                "left_rgb": left_rgb,
+                "right_rgb": right_rgb,
+                "item_idx": j,
+            }
+
+            if step_idx < last_idx:
+                state_dict = self.trajs_states[j + 1]
+            elif step_idx == last_idx:
+                state_dict = self.trajs_last_states[(route_idx, ep_idx)]
+            else:
+                raise Exception(
+                    "step idx {} can't be larger than the last idx {}".format(
+                        step_idx, last_idx
+                    )
+                )
+
+            for state_key in state_dict:
+                next_obs_dict[state_key] = th.Tensor(state_dict[state_key])
+
+            next_obs_dict["traj_plot"] = traj_plotter(state_dict["traj"])
+            next_obs_dict["traj_plot_rgb"] = traj_plotter_rgb(state_dict["traj"])
+
+            self.actual_obs[j] = obs_dict
+            self.next_obs[j] = next_obs_dict
+        else:
+            obs_dict = self.actual_obs[j]
+            next_obs_dict = self.next_obs[j]
+
+        return obs_dict, self.trajs_actions[j], next_obs_dict

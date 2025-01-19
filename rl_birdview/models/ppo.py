@@ -11,7 +11,7 @@ from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.utils import explained_variance
 
-from .ppo_buffer import PpoBuffer
+from .ppo_buffer import PpoBuffer, PpoTransitionBuffer
 from rl_birdview.models.discriminator import ExpertDataset
 
 from tqdm import tqdm
@@ -43,6 +43,7 @@ class PPO:
         gail_gamma=0.0,
         gail_gamma_decay=1.0,
         start_update: int = 0,
+        **kwargs,
     ):
 
         self.policy = policy
@@ -73,15 +74,31 @@ class PPO:
         self._last_obs = None
         self._last_dones = None
         self.ep_stat_buffer = None
+        self.algo_type = "hgail"
 
-        self.buffer = PpoBuffer(
-            self.n_steps,
-            self.env.observation_space,
-            self.env.action_space,
-            gamma=self.gamma,
-            gae_lambda=self.gae_lambda,
-            n_envs=self.env.num_envs,
-        )
+        if "algo_type" in kwargs:
+            self.algo_type = kwargs["algo_type"]
+
+        if self.algo_type == "hgail":
+            self.buffer = PpoBuffer(
+                self.n_steps,
+                self.env.observation_space,
+                self.env.action_space,
+                gamma=self.gamma,
+                gae_lambda=self.gae_lambda,
+                n_envs=self.env.num_envs,
+            )
+        elif self.algo_type == "airl":
+            self.buffer = PpoTransitionBuffer(
+                self.n_steps,
+                self.env.observation_space,
+                self.env.action_space,
+                gamma=self.gamma,
+                gae_lambda=self.gae_lambda,
+                n_envs=self.env.num_envs,
+            )
+        else:
+            raise Exception("unsupported algorithm ", self.algo_type)
         self.policy = self.policy.to(self.policy.device)
         self.discriminator = self.discriminator.to(self.discriminator.device)
 
@@ -122,6 +139,9 @@ class PPO:
                 self.sigma_statistics.append(sigma)
 
                 new_obs, rewards, dones, infos = env.step(actions)
+
+                if any(dones):
+                    print("reset at step ", n_steps)
 
                 if callback.on_step() is False:
                     return False
@@ -171,7 +191,12 @@ class PPO:
             self.route_completion_buffer.append(route_completion)
         last_values = self.policy.forward_value(self._last_obs)
         if self.gail:
+            init_memory = th.cuda.memory_allocated()
             self.discriminator.update(self.buffer)
+            disc_train_memory = th.cuda.memory_allocated()
+            print(
+                f"disc train memory difference: {(disc_train_memory - init_memory) / 1024**2:.2f} MB"
+            )
             for step in range(rollout_buffer.buffer_size):
                 obs_dict = dict(
                     [
@@ -275,7 +300,16 @@ class PPO:
 
                 # Expert dataset
                 for expert_batch in self.discriminator.expert_loader:
-                    expert_obs_dict, expert_action = expert_batch
+                    if self.algo_type == "hgail":
+                        expert_obs_dict, expert_action = expert_batch
+                    elif self.algo_type == "airl":
+                        expert_obs_dict, expert_action, expert_next_obs_dict = (
+                            expert_batch
+                        )
+                    else:
+                        raise Exception(
+                            "do not support algorithm type ", self.algo_type
+                        )
                     obs_tensor_dict = dict(
                         [
                             (obs_key, obs_item.float().to(self.policy.device))
@@ -453,8 +487,13 @@ class PPO:
             callback.on_rollout_start()
             t0 = time.time()
             self.policy = self.policy.train()
+            init_memory = th.cuda.memory_allocated()
             continue_training = self.collect_rollouts(
                 self.env, callback, self.buffer, self.n_steps
+            )
+            rollout_memory = th.cuda.memory_allocated()
+            print(
+                f"rollout memory difference: {(rollout_memory - init_memory) / 1024**2:.2f} MB, memory reserved: {th.cuda.memory_reserved() / 1024**2:.2f}, init alloc: {init_memory / 1024**2:.2f}, memory allocation: {rollout_memory / 1024**2:.2f}"
             )
             self.t_rollout = time.time() - t0
             callback.on_rollout_end()

@@ -64,10 +64,7 @@ class ValeoNoDetPx(object):
             timeout = False
 
         # done = c_blocked or c_lat_dist or c_run_rl or c_collision or c_run_stop or c_collision_px or timeout
-        # done = c_blocked or c_lat_dist or c_collision or c_collision_px or timeout
-        # FIXME: ONLY timeout
-        timeout = timestamp["step"] > 180
-        done = timeout
+        done = c_blocked or c_lat_dist or c_collision or c_collision_px or timeout
         # print(
         #     "blocked {}, lat_dist {}, collision {}, collision_px {}, timestamp {}, timeout {}, done {}".format(
         #         c_blocked,

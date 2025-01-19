@@ -14,6 +14,8 @@ from stable_baselines3.common.utils import explained_variance
 from .ppo_buffer import PpoBuffer
 from rl_birdview.models.discriminator import ExpertDataset
 
+from tqdm import tqdm
+
 
 class PPO:
     def __init__(
@@ -110,59 +112,56 @@ class PPO:
         self.sigma_statistics = []
         start_route_completion = []
 
-        print("========> start collect rollouts =============")
+        with tqdm(total=n_rollout_steps) as pbar:
+            while n_steps < n_rollout_steps:
+                actions, values, log_probs, mu, sigma, _, fake_birdview = (
+                    self.policy.forward(self._last_obs)
+                )
+                self.action_statistics.append(actions)
+                self.mu_statistics.append(mu)
+                self.sigma_statistics.append(sigma)
 
-        while n_steps < n_rollout_steps:
-            print(
-                "rollout step {} out of total steps {}".format(n_steps, n_rollout_steps)
-            )
-            actions, values, log_probs, mu, sigma, _, fake_birdview = (
-                self.policy.forward(self._last_obs)
-            )
-            self.action_statistics.append(actions)
-            self.mu_statistics.append(mu)
-            self.sigma_statistics.append(sigma)
+                new_obs, rewards, dones, infos = env.step(actions)
 
-            new_obs, rewards, dones, infos = env.step(actions)
+                if callback.on_step() is False:
+                    return False
 
-            if callback.on_step() is False:
-                return False
+                if n_steps == 0:
+                    for info in infos:
+                        start_route_completion.append(info["route_completion"])
 
-            if n_steps == 0:
-                for info in infos:
-                    start_route_completion.append(info["route_completion"])
+                n_steps += 1
+                self.num_timesteps += env.num_envs
 
-            n_steps += 1
-            self.num_timesteps += env.num_envs
+                # update_info_buffer
+                for i in np.where(dones)[0]:
+                    self.ep_stat_buffer.append(infos[i]["episode_stat"])
+                    if n_steps < n_rollout_steps:
+                        route_completion = infos[i]["route_completion"]
+                        for dict_key in route_completion:
+                            route_completion[dict_key] -= start_route_completion[i][
+                                dict_key
+                            ]
+                        self.route_completion_buffer.append(route_completion)
 
-            # update_info_buffer
-            for i in np.where(dones)[0]:
-                self.ep_stat_buffer.append(infos[i]["episode_stat"])
-                if n_steps < n_rollout_steps:
-                    route_completion = infos[i]["route_completion"]
-                    for dict_key in route_completion:
-                        route_completion[dict_key] -= start_route_completion[i][
-                            dict_key
-                        ]
-                    self.route_completion_buffer.append(route_completion)
+                for i in np.where(self._last_dones)[0]:
+                    start_route_completion[i] = infos[i]["route_completion"]
 
-            for i in np.where(self._last_dones)[0]:
-                start_route_completion[i] = infos[i]["route_completion"]
-
-            rollout_buffer.add(
-                self._last_obs,
-                actions,
-                rewards,
-                self._last_dones,
-                values,
-                log_probs,
-                mu,
-                sigma,
-                fake_birdview,
-                infos,
-            )
-            self._last_obs = new_obs
-            self._last_dones = dones
+                rollout_buffer.add(
+                    self._last_obs,
+                    actions,
+                    rewards,
+                    self._last_dones,
+                    values,
+                    log_probs,
+                    mu,
+                    sigma,
+                    fake_birdview,
+                    infos,
+                )
+                self._last_obs = new_obs
+                self._last_dones = dones
+                pbar.update(1)
 
         # update_info_buffer
         for info_idx in range(len(infos)):
@@ -194,9 +193,6 @@ class PPO:
         rollout_buffer.compute_returns_and_advantage(
             last_values, dones=self._last_dones
         )
-
-        print("========> stop collect rollouts =============")
-
         return True
 
     def train(self):
@@ -253,6 +249,10 @@ class PPO:
                         detach_values=False,
                     )
                 )
+
+                if entropy_loss is None:
+                    entropy_loss = -th.mean(-log_prob)
+
                 # Normalize advantage
                 advantages = rollout_data.advantages
                 # advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
@@ -312,6 +312,16 @@ class PPO:
                         -self.clip_range_vf,
                         self.clip_range_vf,
                     )
+
+                # FIXME:
+                # print(
+                #     "return {} old value mean {} value mean {} value pred mean {}".format(
+                #         rollout_data.returns.mean().item(0),
+                #         rollout_data.old_values.mean().item(),
+                #         values.mean().item(),
+                #         values_pred.mean().item(),
+                #     )
+                # )
                 # Value loss using the TD(gae_lambda) target
                 value_loss = F.mse_loss(rollout_data.returns, values_pred)
 

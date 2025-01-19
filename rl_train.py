@@ -203,9 +203,12 @@ if __name__ == "__main__":
         "observation_space": env.observation_space,
         "action_space": env.action_space,
         "batch_size": 256,
+        # "batch_size": 64,
         "disc_head_arch": [256, 256],
         "rgb_gail": RGB_GAIL,
         "traj_plot": TRAJ_PLOT,
+        # algo type: hgail, airl
+        "algo_type": "airl",
     }
     output_dir = Path("outputs")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -218,6 +221,7 @@ if __name__ == "__main__":
         # "n_steps_total": 12288,
         # "n_steps_total": 8192,
         "n_steps_total": 6144,
+        # "n_steps_total": 64,
         "batch_size": 256,
         "n_epochs": 20,
         "gamma": 0.99,
@@ -235,6 +239,7 @@ if __name__ == "__main__":
         "gail_gamma": 0.0,
         "gail_gamma_decay": 1.0,
         "update_adv": False,
+        "algo_type": "airl",
     }
 
     if RESUME_LAST_TRAIN:

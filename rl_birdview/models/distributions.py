@@ -16,7 +16,7 @@ def sum_independent_dims(tensor: th.Tensor) -> th.Tensor:
     return tensor
 
 
-class DiagGaussianDistribution():
+class DiagGaussianDistribution:
     def __init__(self, action_dim: int, dist_init=None, action_dependent_std=False):
         self.distribution = None
         self.action_dim = action_dim
@@ -30,25 +30,25 @@ class DiagGaussianDistribution():
 
         # [mu, log_std], [0, 1]
         self.acc_exploration_dist = {
-            'go': th.FloatTensor([0.66, -3]),
-            'stop': th.FloatTensor([-0.66, -3])
+            "go": th.FloatTensor([0.66, -3]),
+            "stop": th.FloatTensor([-0.66, -3]),
         }
         self.steer_exploration_dist = {
-            'turn': th.FloatTensor([0.0, -1]),
-            'straight': th.FloatTensor([3.0, 3.0])
+            "turn": th.FloatTensor([0.0, -1]),
+            "straight": th.FloatTensor([3.0, 3.0]),
         }
 
         if th.cuda.is_available():
-            self.device = 'cuda'
+            self.device = "cuda"
         else:
-            self.device = 'cpu'
+            self.device = "cpu"
 
     def proba_distribution_net(self, latent_dim: int) -> Tuple[nn.Module, nn.Parameter]:
         mean_actions = nn.Linear(latent_dim, self.action_dim)
         if self.action_dependent_std:
             log_std = nn.Linear(latent_dim, self.action_dim)
         else:
-            log_std = nn.Parameter(-2.0*th.ones(self.action_dim), requires_grad=True)
+            log_std = nn.Parameter(-2.0 * th.ones(self.action_dim), requires_grad=True)
 
         if self.dist_init is not None:
             # log_std.weight.data.fill_(0.01)
@@ -60,12 +60,16 @@ class DiagGaussianDistribution():
                 log_std.bias.data[0] = self.dist_init[0][1]
                 log_std.bias.data[1] = self.dist_init[1][1]
             else:
-                init_tensor = th.FloatTensor([self.dist_init[0][1], self.dist_init[1][1]])
+                init_tensor = th.FloatTensor(
+                    [self.dist_init[0][1], self.dist_init[1][1]]
+                )
                 log_std = nn.Parameter(init_tensor, requires_grad=True)
 
         return mean_actions, log_std
 
-    def proba_distribution(self, mean_actions: th.Tensor, log_std: th.Tensor) -> "DiagGaussianDistribution":
+    def proba_distribution(
+        self, mean_actions: th.Tensor, log_std: th.Tensor
+    ) -> "DiagGaussianDistribution":
         if self.action_dependent_std:
             log_std = th.clamp(log_std, self.log_std_min, self.log_std_max)
         action_std = th.ones_like(mean_actions) * log_std.exp()
@@ -87,10 +91,10 @@ class DiagGaussianDistribution():
         sigma = self.distribution.scale.detach().clone()
 
         for i, (acc_suggest, steer_suggest) in enumerate(exploration_suggests):
-            if acc_suggest != '':
+            if acc_suggest != "":
                 mu[i, 0] = self.acc_exploration_dist[acc_suggest][0]
                 sigma[i, 0] = self.acc_exploration_dist[acc_suggest][1]
-            if steer_suggest != '':
+            if steer_suggest != "":
                 mu[i, 1] = self.steer_exploration_dist[steer_suggest][0]
                 sigma[i, 1] = self.steer_exploration_dist[steer_suggest][1]
 
@@ -111,8 +115,10 @@ class DiagGaussianDistribution():
         return self.sample()
 
 
-class SquashedDiagGaussianDistribution():
-    def __init__(self, action_dim: int, log_std_init: float = 0.0, action_dependent_std=False):
+class SquashedDiagGaussianDistribution:
+    def __init__(
+        self, action_dim: int, log_std_init: float = 0.0, action_dependent_std=False
+    ):
         self.distribution = None
 
         self.action_dim = action_dim
@@ -132,7 +138,9 @@ class SquashedDiagGaussianDistribution():
         if self.action_dependent_std:
             log_std = nn.Linear(latent_dim, self.action_dim)
         else:
-            log_std = nn.Parameter(th.ones(self.action_dim) * self.log_std_init, requires_grad=True)
+            log_std = nn.Parameter(
+                th.ones(self.action_dim) * self.log_std_init, requires_grad=True
+            )
         return mean_actions, log_std
 
     def proba_distribution(self, mean_actions: th.Tensor, log_std: th.Tensor):
@@ -142,11 +150,17 @@ class SquashedDiagGaussianDistribution():
         self.distribution = Normal(mean_actions, action_std)
         return self
 
-    def log_prob(self, actions: th.Tensor, gaussian_actions: Optional[th.Tensor] = None) -> th.Tensor:
+    def log_prob(
+        self, actions: th.Tensor, gaussian_actions: Optional[th.Tensor] = None
+    ) -> th.Tensor:
         # Inverse tanh
         if gaussian_actions is None:
-            gaussian_actions = th.clamp(actions, min=-1.0 + self.eps, max=1.0 - self.eps)
-            gaussian_actions = 0.5 * (gaussian_actions.log1p() - (-gaussian_actions).log1p())
+            gaussian_actions = th.clamp(
+                actions, min=-1.0 + self.eps, max=1.0 - self.eps
+            )
+            gaussian_actions = 0.5 * (
+                gaussian_actions.log1p() - (-gaussian_actions).log1p()
+            )
 
         # Log likelihood for a Gaussian distribution
         log_prob = self.distribution.log_prob(gaussian_actions)
@@ -155,7 +169,9 @@ class SquashedDiagGaussianDistribution():
         # sb3 correction
         # log_prob -= th.sum(th.log(1 - actions ** 2 + self.eps), dim=1)
         # spinning-up correction
-        log_prob -= (2*(np.log(2) - gaussian_actions - F.softplus(-2*gaussian_actions))).sum(axis=1)
+        log_prob -= (
+            2 * (np.log(2) - gaussian_actions - F.softplus(-2 * gaussian_actions))
+        ).sum(axis=1)
         return log_prob
 
     def entropy(self) -> Optional[th.Tensor]:
@@ -172,8 +188,14 @@ class SquashedDiagGaussianDistribution():
             return self.mode()
         return self.sample()
 
+    def entropy_loss(self):
+        return None
 
-class BetaDistribution():
+    def exploration_loss(self, exploration_suggests):
+        return th.zeros(1, device="cuda:0")
+
+
+class BetaDistribution:
     def __init__(self, action_dim=2, dist_init=None):
         assert action_dim == 2
 
@@ -187,18 +209,18 @@ class BetaDistribution():
         self.acc_exploration_dist = {
             # [1, 2.5]
             # [1.5, 1.0]
-            'go': th.FloatTensor([1.0, 2.5]),
-            'stop': th.FloatTensor([1.5, 1.0])
+            "go": th.FloatTensor([1.0, 2.5]),
+            "stop": th.FloatTensor([1.5, 1.0]),
         }
         self.steer_exploration_dist = {
-            'turn': th.FloatTensor([1.0, 1.0]),
-            'straight': th.FloatTensor([3.0, 3.0])
+            "turn": th.FloatTensor([1.0, 1.0]),
+            "straight": th.FloatTensor([3.0, 3.0]),
         }
 
         if th.cuda.is_available():
-            self.device = 'cuda'
+            self.device = "cuda"
         else:
-            self.device = 'cpu'
+            self.device = "cpu"
 
     def proba_distribution_net(self, latent_dim: int) -> Tuple[nn.Module, nn.Module]:
 
@@ -238,10 +260,10 @@ class BetaDistribution():
         beta = self.distribution.concentration0.detach().clone()
 
         for i, (acc_suggest, steer_suggest) in enumerate(exploration_suggests):
-            if acc_suggest != '':
+            if acc_suggest != "":
                 beta[i, 0] = self.acc_exploration_dist[acc_suggest][0]
                 alpha[i, 0] = self.acc_exploration_dist[acc_suggest][1]
-            if steer_suggest != '':
+            if steer_suggest != "":
                 beta[i, 1] = self.steer_exploration_dist[steer_suggest][0]
                 alpha[i, 1] = self.steer_exploration_dist[steer_suggest][1]
 
@@ -260,7 +282,7 @@ class BetaDistribution():
         x = th.zeros_like(alpha)
         x[:, 1] += 0.5
         mask1 = (alpha > 1) & (beta > 1)
-        x[mask1] = (alpha[mask1]-1)/(alpha[mask1]+beta[mask1]-2)
+        x[mask1] = (alpha[mask1] - 1) / (alpha[mask1] + beta[mask1] - 2)
 
         mask2 = (alpha <= 1) & (beta > 1)
         x[mask2] = 0.0
